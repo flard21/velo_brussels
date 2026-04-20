@@ -1,0 +1,32 @@
+services:
+
+  velo-brussels:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: velo-brussels
+    restart: unless-stopped
+
+    environment:
+      # Chemin de la base SQLite à l'intérieur du container
+      DB_PATH: /data/velo.db
+
+    ports:
+      # Dashboard accessible sur http://localhost:8080
+      - "8080:5000"
+
+    volumes:
+      # Persistance de la base SQLite entre redémarrages
+      - velo_data:/data
+
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/dates')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  velo_data:
+    driver: local
