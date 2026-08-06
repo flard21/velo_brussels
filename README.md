@@ -11,23 +11,35 @@ Cette application collecte automatiquement les données des compteurs vélo de B
 |---|---|
 | `collector.py` | Collecte les données de l'API et écrit dans SQLite |
 | `app.py` | Serveur Flask — dashboard + API REST |
-| Base de données | SQLite dans `/data/velo.db` (volume Docker) |
+| `pyproject.toml` / `uv.lock` | Dépendances Python, gérées avec [uv](https://docs.astral.sh/uv/) |
+| Base de données | SQLite dans `/data/velo.db` (volume du conteneur) |
 | Fréquence | Toutes les 30 minutes via cron |
 | Port web | http://localhost:8080 |
+
+L'image est construite avec [uv](https://docs.astral.sh/uv/) (résolution et installation des dépendances Python) et peut être lancée aussi bien avec **Docker** qu'avec **Podman** — les deux moteurs sont compatibles avec le `Dockerfile` et le `docker-compose.yml` fournis. Les exemples ci‑dessous donnent la commande équivalente pour chacun ; utilisez celle qui correspond à votre installation.
 
 ---
 
 ## 2. Pré-requis
 
-- Docker Desktop installé et démarré
-- Docker Compose (inclus dans Docker Desktop)
-- Accès Internet (pour l'API mobility.brussels)
+Un des deux moteurs de conteneurs suivants :
 
-Vérifier que Docker fonctionne :
+- **Docker** : Docker Desktop installé et démarré (Docker Compose est inclus)
+- **Podman** : Podman Desktop / `podman` CLI, avec une machine démarrée sur Windows/macOS (`podman machine init` puis `podman machine start`) et le plugin compose (`podman compose`, qui s'appuie sur `docker-compose` s'il est présent, ou sur `podman-compose`)
+
+Ainsi qu'un accès Internet (pour l'API mobility.brussels).
+
+Vérifier que l'un des deux fonctionne :
 
 ```bash
+# Docker
 docker --version
 docker compose version
+
+# Podman
+podman --version
+podman machine list      # doit afficher une machine "Currently running" (Windows/macOS)
+podman compose version
 ```
 
 ---
@@ -41,10 +53,15 @@ velo_brussels/
 ├── collector.py
 ├── app.py
 ├── Dockerfile
+├── .dockerignore
 ├── entrypoint.sh
-├── requirements.txt
+├── pyproject.toml
+├── uv.lock
+├── .python-version
 └── docker-compose.yml
 ```
+
+`pyproject.toml` et `uv.lock` remplacent l'ancien `requirements.txt` : ils définissent et verrouillent les dépendances Python (`flask`, `requests`) résolues par `uv`. Le `Dockerfile` copie ces deux fichiers et exécute `uv sync --locked` pour construire un environnement reproductible au moment du build — inutile d'installer quoi que ce soit manuellement.
 
 ---
 
@@ -55,18 +72,23 @@ velo_brussels/
 Dans le dossier `velo_brussels/`, exécuter :
 
 ```bash
+# Docker
 docker compose up -d --build
+
+# Podman
+podman compose up -d --build
 ```
 
 Cette commande :
-- construit l'image Docker (Python + Flask + cron)
-- lance le container en arrière-plan
+
+- construit l'image du conteneur (Python 3.14 + uv + Flask + cron)
+- lance le conteneur en arrière-plan
 - exécute une première collecte immédiatement
 - active le cron pour les collectes suivantes
 
 ### 4.2 Accès au dashboard
 
-Une fois le container démarré, ouvrir dans un navigateur :
+Une fois le conteneur démarré, ouvrir dans un navigateur :
 
 ```
 http://localhost:8080
@@ -87,8 +109,16 @@ La collecte se déclenche automatiquement toutes les **30 minutes**. Aucune acti
 Pour déclencher manuellement une collecte sans attendre le cron :
 
 ```bash
-docker exec velo-brussels python /app/collector.py
+# Docker
+docker exec velo-brussels /app/.venv/bin/python /app/collector.py
+
+# Podman
+podman exec velo-brussels /app/.venv/bin/python /app/collector.py
 ```
+
+> Le conteneur exécute Python depuis l'environnement virtuel géré par `uv` (`/app/.venv`), et non depuis un `python` installé globalement — utilisez ce chemin plutôt que `python` seul.
+
+Il est aussi possible de déclencher une collecte depuis le dashboard lui‑même via le bouton **Actualiser**, qui appelle l'endpoint `POST /api/refresh`.
 
 ### 5.3 Rafraîchir l'interface web
 
@@ -103,30 +133,39 @@ L'interface ne se rafraîchit pas seule. Pour voir les nouvelles données :
 
 ## 6. Commandes utiles
 
-### 6.1 Vérifier l'état du container
+### 6.1 Vérifier l'état du conteneur
 ```bash
-docker compose ps
+docker compose ps      # Docker
+podman compose ps      # Podman
 ```
 
 ### 6.2 Voir les logs en temps réel
 ```bash
-docker compose logs -f
+docker compose logs -f      # Docker
+podman compose logs -f      # Podman
 ```
 
 ### 6.3 Voir uniquement les logs de collecte
 ```bash
-docker exec velo-brussels cat /var/log/collector.log
+docker exec velo-brussels cat /var/log/collector.log      # Docker
+podman exec velo-brussels cat /var/log/collector.log      # Podman
 ```
 
 ### 6.4 Vérifier que le cron tourne
 ```bash
+# Docker
 docker exec velo-brussels service cron status
 docker exec velo-brussels crontab -l
+
+# Podman
+podman exec velo-brussels service cron status
+podman exec velo-brussels crontab -l
 ```
 
 ### 6.5 Inspecter la base SQLite
 ```bash
-docker exec -it velo-brussels sqlite3 /data/velo.db
+docker exec -it velo-brussels sqlite3 /data/velo.db      # Docker
+podman exec -it velo-brussels sqlite3 /data/velo.db      # Podman
 ```
 
 Une fois dans sqlite3 :
@@ -138,7 +177,8 @@ SELECT * FROM counts ORDER BY collected_at DESC LIMIT 10;
 
 ### 6.6 Arrêter l'application
 ```bash
-docker compose down
+docker compose down      # Docker
+podman compose down      # Podman
 ```
 
 ### 6.7 Arrêter et supprimer les données
@@ -146,7 +186,8 @@ docker compose down
 > ⚠️ Cette commande supprime définitivement la base SQLite et tout l'historique.
 
 ```bash
-docker compose down -v
+docker compose down -v      # Docker
+podman compose down -v      # Podman
 ```
 
 ---
@@ -157,24 +198,34 @@ docker compose down -v
 
 Forcer une collecte manuelle :
 ```bash
-docker exec velo-brussels python /app/collector.py
+docker exec velo-brussels /app/.venv/bin/python /app/collector.py      # Docker
+podman exec velo-brussels /app/.venv/bin/python /app/collector.py      # Podman
 ```
 
 Vérifier les logs pour détecter une erreur API :
 ```bash
-docker exec velo-brussels cat /var/log/collector.log
+docker exec velo-brussels cat /var/log/collector.log      # Docker
+podman exec velo-brussels cat /var/log/collector.log      # Podman
 ```
 
 ### Le dashboard ne charge pas (http://localhost:8080)
 
-Vérifier que le container est bien démarré :
+Vérifier que le conteneur est bien démarré :
 ```bash
-docker compose ps
+docker compose ps      # Docker
+podman compose ps      # Podman
+```
+
+Sous Podman sur Windows/macOS, vérifier aussi que la machine tourne :
+```bash
+podman machine list
+podman machine start     # si elle n'est pas "Currently running"
 ```
 
 Relancer si nécessaire :
 ```bash
-docker compose up -d
+docker compose up -d      # Docker
+podman compose up -d      # Podman
 ```
 
 ### Changer la fréquence de collecte
@@ -183,19 +234,30 @@ Modifier la ligne cron dans `entrypoint.sh` :
 
 ```bash
 # Toutes les 30 min (défaut)
-*/30 * * * * python /app/collector.py >> /var/log/collector.log 2>&1
+*/30 * * * * $PYTHON /app/collector.py >> /var/log/collector.log 2>&1
 
 # Toutes les heures
-0 * * * * python /app/collector.py >> /var/log/collector.log 2>&1
+0 * * * * $PYTHON /app/collector.py >> /var/log/collector.log 2>&1
 
 # Toutes les 15 min
-*/15 * * * * python /app/collector.py >> /var/log/collector.log 2>&1
+*/15 * * * * $PYTHON /app/collector.py >> /var/log/collector.log 2>&1
 ```
 
-Puis reconstruire le container :
+Puis reconstruire le conteneur :
 ```bash
-docker compose up -d --build
+docker compose up -d --build      # Docker
+podman compose up -d --build      # Podman
 ```
+
+### Mettre à jour les dépendances Python
+
+Les dépendances sont verrouillées dans `uv.lock`. Pour changer une version, éditer `pyproject.toml` puis régénérer le lock avec `uv` (installé localement, ou via `uvx`) :
+
+```bash
+uv lock
+```
+
+Committer le nouveau `uv.lock`, puis reconstruire l'image (voir ci-dessus) pour que `uv sync --locked` installe les versions mises à jour.
 
 ---
 
@@ -207,7 +269,7 @@ Flux de données :
 API mobility.brussels
         │
         ▼
-  collector.py  (cron 30 min)
+  collector.py  (cron 30 min, exécuté par /app/.venv/bin/python)
         │
         ▼
    /data/velo.db  (SQLite)
@@ -218,6 +280,8 @@ API mobility.brussels
         ▼
 http://localhost:8080  (Leaflet + JS)
 ```
+
+Au build de l'image, `uv sync --locked` lit `pyproject.toml` et `uv.lock` pour créer l'environnement virtuel `/app/.venv` utilisé ensuite par `entrypoint.sh` pour lancer aussi bien la collecte initiale, le job cron, que le serveur Flask.
 
 ---
 

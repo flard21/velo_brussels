@@ -7,6 +7,10 @@ import requests
 import sqlite3
 import os
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURATION ---
 DB_PATH = os.environ.get("DB_PATH", "/data/velo.db")
@@ -63,18 +67,43 @@ def upsert_device(conn: sqlite3.Connection, device_id: str, location: str,
 
 def insert_count(conn: sqlite3.Connection, device_id: str, cnt_time: str,
                  hour_cnt, day_cnt, year_cnt):
+    if cnt_time:
+        # Check if we already have this count to avoid duplicate rows
+        cursor = conn.execute("""
+            SELECT 1 FROM counts
+            WHERE device_id = ? AND cnt_time = ?
+            LIMIT 1
+        """, (device_id, cnt_time))
+        if cursor.fetchone():
+            return False
+
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute("""
         INSERT INTO counts (device_id, collected_at, cnt_time, hour_cnt, day_cnt, year_cnt)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (device_id, now_utc, cnt_time, hour_cnt, day_cnt, year_cnt))
+    return True
+
+
+def fetch_device_live(device_id: str):
+    """Fetch live counts for a single device from the API."""
+    url_count = (
+        f"https://data.mobility.brussels/bike/api/counts/"
+        f"?request=live&featureID={device_id}"
+    )
+    try:
+        r = requests.get(url_count, timeout=15, verify=False)
+        r.raise_for_status()
+        return device_id, r.json()
+    except Exception as e:
+        return device_id, e
 
 
 def get_bike_data(conn: sqlite3.Connection):
     url_devices = "https://data.mobility.brussels/bike/api/counts/?request=devices"
 
     try:
-        resp = requests.get(url_devices, timeout=30)
+        resp = requests.get(url_devices, timeout=30, verify=False)
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as e:
@@ -82,7 +111,9 @@ def get_bike_data(conn: sqlite3.Connection):
         return 0
 
     inserted = 0
+    devices_to_fetch = []
 
+    # Update devices metadata
     for feature in data.get("features", []):
         props = feature.get("properties", {})
         geom  = feature.get("geometry", {})
@@ -93,26 +124,44 @@ def get_bike_data(conn: sqlite3.Connection):
         lon, lat  = coords[0], coords[1]
 
         upsert_device(conn, device_id, location, lat, lon)
+        devices_to_fetch.append(device_id)
 
-        url_count = (
-            f"https://data.mobility.brussels/bike/api/counts/"
-            f"?request=live&featureID={device_id}"
-        )
+    # Fetch live counts concurrently (max 10 threads)
+    results = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_device = {
+            executor.submit(fetch_device_live, dev_id): dev_id
+            for dev_id in devices_to_fetch
+        }
+        for future in future_to_device:
+            dev_id = future_to_device[future]
+            try:
+                device_id, res = future.result()
+                results[device_id] = res
+            except Exception as e:
+                results[dev_id] = e
+
+    # Sequentially write counts to sqlite in the main thread
+    for device_id in devices_to_fetch:
+        res = results.get(device_id)
+        if isinstance(res, Exception) or res is None:
+            print(f"  ✗  {device_id} : {res}")
+            continue
+
         try:
-            r = requests.get(url_count, timeout=15)
-            r.raise_for_status()
-            count = r.json()
+            cnt_time  = clean_date(res["data"].get("cnt_time", ""))
+            hour_cnt  = res["data"].get("hour_cnt")
+            day_cnt   = res["data"].get("day_cnt")
+            year_cnt  = res["data"].get("year_cnt")
 
-            cnt_time  = clean_date(count["data"].get("cnt_time", ""))
-            hour_cnt  = count["data"].get("hour_cnt")
-            day_cnt   = count["data"].get("day_cnt")
-            year_cnt  = count["data"].get("year_cnt")
-
-            insert_count(conn, device_id, cnt_time, hour_cnt, day_cnt, year_cnt)
-            inserted += 1
-            print(f"  ✓  {device_id}")
+            is_new = insert_count(conn, device_id, cnt_time, hour_cnt, day_cnt, year_cnt)
+            if is_new:
+                print(f"  ✓  {device_id} (nouveau)")
+                inserted += 1
+            else:
+                print(f"  ~  {device_id} (déjà à jour)")
         except Exception as e:
-            print(f"  ✗  {device_id} : {e}")
+            print(f"  ✗  {device_id} (écriture base) : {e}")
 
     conn.commit()
     return inserted

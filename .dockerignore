@@ -1,0 +1,8 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+.python-version
+CLAUDE.md
+README.md
+README_VeloBruxelles.docx
