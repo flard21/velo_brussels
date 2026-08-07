@@ -283,6 +283,8 @@ http://localhost:8080  (Leaflet + JS)
 
 Au build de l'image, `uv sync --locked` lit `pyproject.toml` et `uv.lock` pour créer l'environnement virtuel `/app/.venv` utilisé ensuite par `entrypoint.sh` pour lancer aussi bien la collecte initiale, le job cron, que le serveur Flask.
 
+Un modèle C4 détaillé (diagrammes Context et Container, notation [Structurizr](https://structurizr.com/)) est disponible dans [`docs/architecture/`](docs/architecture/).
+
 ---
 
 *— Fin du document —*

@@ -1,0 +1,14 @@
+services:
+  structurizr-lite:
+    # structurizr/lite est en fin de vie (n'affiche qu'un message de dépréciation
+    # puis s'arrête) ; structurizr/structurizr avec la commande "local" est son
+    # remplaçant officiel pour le rendu local d'un workspace.dsl.
+    image: structurizr/structurizr
+    command: local
+    container_name: velo-brussels-structurizr
+    ports:
+      # Interface Structurizr sur http://localhost:8081
+      - "8081:8080"
+    volumes:
+      # Monte ce dossier (contenant workspace.dsl) dans le conteneur
+      - .:/usr/local/structurizr
