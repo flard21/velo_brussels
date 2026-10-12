@@ -10,8 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Binaire uv (statique, copié depuis l'image officielle — pas d'installation via pip)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Binaire uv (statique, copié depuis l'image officielle — pas d'installation via pip).
+# Version figée pour des builds reproductibles ; à monter volontairement.
+COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /uvx /bin/
 
 # Dépendances système minimales (sqlite3 inclus dans python:slim)
 RUN apt-get update && apt-get install -y --no-install-recommends \
