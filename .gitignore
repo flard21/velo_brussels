@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 certs/*
 !certs/.gitkeep
+# Données d'exécution de Structurizr local (index de recherche, logs, verrou)
+docs/architecture/.structurizr/
