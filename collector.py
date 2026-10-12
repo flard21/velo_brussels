@@ -41,6 +41,29 @@ def init_db(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_counts_device_date
             ON counts (device_id, collected_at);
     """)
+
+    # Migration : unicité (device_id, cnt_time) pour une déduplication atomique
+    # (cron et /api/refresh peuvent tourner en même temps). Les bases créées
+    # avant cet index peuvent contenir des doublons et des cnt_time vides, à
+    # nettoyer avant de pouvoir le créer. cnt_time NULL reste autorisé en
+    # plusieurs exemplaires (NULL est distinct pour un index UNIQUE SQLite).
+    has_unique = conn.execute("""
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'index' AND name = 'idx_counts_device_cnt_time'
+    """).fetchone()
+    if not has_unique:
+        conn.executescript("""
+            UPDATE counts SET cnt_time = NULL WHERE cnt_time = '';
+            DELETE FROM counts
+            WHERE cnt_time IS NOT NULL
+              AND id NOT IN (
+                  SELECT MIN(id) FROM counts
+                  WHERE cnt_time IS NOT NULL
+                  GROUP BY device_id, cnt_time
+              );
+            CREATE UNIQUE INDEX idx_counts_device_cnt_time
+                ON counts (device_id, cnt_time);
+        """)
     conn.commit()
 
 
@@ -67,22 +90,15 @@ def upsert_device(conn: sqlite3.Connection, device_id: str, location: str,
 
 def insert_count(conn: sqlite3.Connection, device_id: str, cnt_time: str,
                  hour_cnt, day_cnt, year_cnt):
-    if cnt_time:
-        # Check if we already have this count to avoid duplicate rows
-        cursor = conn.execute("""
-            SELECT 1 FROM counts
-            WHERE device_id = ? AND cnt_time = ?
-            LIMIT 1
-        """, (device_id, cnt_time))
-        if cursor.fetchone():
-            return False
-
+    # L'index UNIQUE (device_id, cnt_time) ignore un relevé déjà enregistré ;
+    # un cnt_time absent est stocké NULL et toujours inséré.
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute("""
-        INSERT INTO counts (device_id, collected_at, cnt_time, hour_cnt, day_cnt, year_cnt)
+    cursor = conn.execute("""
+        INSERT OR IGNORE INTO counts
+            (device_id, collected_at, cnt_time, hour_cnt, day_cnt, year_cnt)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (device_id, now_utc, cnt_time, hour_cnt, day_cnt, year_cnt))
-    return True
+    """, (device_id, now_utc, cnt_time or None, hour_cnt, day_cnt, year_cnt))
+    return cursor.rowcount == 1
 
 
 def fetch_device_live(device_id: str):
@@ -125,6 +141,10 @@ def get_bike_data(conn: sqlite3.Connection):
 
         upsert_device(conn, device_id, location, lat, lon)
         devices_to_fetch.append(device_id)
+
+    # Commit avant les appels réseau : sinon le verrou d'écriture SQLite reste
+    # tenu pendant toute la collecte et bloque une collecte concurrente.
+    conn.commit()
 
     # Fetch live counts concurrently (max 10 threads)
     results = {}

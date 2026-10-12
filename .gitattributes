@@ -1,0 +1,4 @@
+# Les scripts exécutés dans le container Linux doivent garder des fins de ligne LF,
+# même sur un checkout Windows avec core.autocrlf=true (sinon : "/bin/bash^M: bad interpreter").
+*.sh text eol=lf
+Dockerfile text eol=lf

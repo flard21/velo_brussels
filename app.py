@@ -10,12 +10,40 @@ import os
 import sqlite3
 import json
 from contextlib import contextmanager
-from datetime import datetime, date
+from datetime import datetime, date, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template_string, request
 
 DB_PATH = os.environ.get("DB_PATH", "/data/velo.db")
 
+# Les compteurs (day_cnt) sont remis à zéro à minuit heure de Bruxelles,
+# alors que collected_at est stocké en UTC : une "journée" doit donc être
+# découpée selon Europe/Brussels, pas selon la date UTC.
+TZ = ZoneInfo("Europe/Brussels")
+DB_FMT = "%Y-%m-%d %H:%M:%S"
+
 app = Flask(__name__)
+
+
+def today_brussels() -> str:
+    return datetime.now(TZ).date().isoformat()
+
+
+def day_bounds_utc(day: str) -> tuple[str, str]:
+    """Bornes UTC [début, fin) de la journée `day` (YYYY-MM-DD) à Bruxelles."""
+    d = date.fromisoformat(day)
+    start = datetime.combine(d, time.min, TZ).astimezone(timezone.utc)
+    end = datetime.combine(d + timedelta(days=1), time.min, TZ).astimezone(timezone.utc)
+    return start.strftime(DB_FMT), end.strftime(DB_FMT)
+
+
+def requested_day_bounds():
+    """Lit ?date=YYYY-MM-DD (défaut : aujourd'hui à Bruxelles) → bornes UTC, ou None si invalide."""
+    day = request.args.get("date") or today_brussels()
+    try:
+        return day_bounds_utc(day)
+    except ValueError:
+        return None
 
 
 @contextmanager
@@ -36,25 +64,38 @@ def get_conn():
 
 @app.get("/api/dates")
 def api_dates():
-    """Retourne les dates (YYYY-MM-DD) pour lesquelles des données existent."""
+    """Retourne les dates (YYYY-MM-DD, heure de Bruxelles) pour lesquelles des données existent."""
+    # SQLite ne gère pas les fuseaux : on récupère les heures UTC distinctes
+    # (les décalages DST sont des heures entières, donc la conversion est exacte)
+    # et on les ramène à la date locale en Python.
     with get_conn() as conn:
         rows = conn.execute("""
-            SELECT DISTINCT substr(collected_at, 1, 10) AS day
+            SELECT DISTINCT substr(collected_at, 1, 13) AS hour
             FROM counts
-            ORDER BY day DESC
-            LIMIT 30
         """).fetchall()
-    return jsonify([r["day"] for r in rows])
+    days = {
+        datetime.strptime(r["hour"], "%Y-%m-%d %H")
+        .replace(tzinfo=timezone.utc)
+        .astimezone(TZ)
+        .date()
+        .isoformat()
+        for r in rows
+    }
+    return jsonify(sorted(days, reverse=True)[:30])
 
 
 @app.get("/api/daily")
 def api_daily():
     """
     Retourne, pour une date donnée (param ?date=YYYY-MM-DD),
-    le dernier relevé de chaque compteur ainsi que sa localisation.
-    Par défaut : aujourd'hui.
+    le dernier relevé de chaque compteur ainsi que sa localisation,
+    et le pic horaire (peak_hour_cnt) observé sur la journée.
+    Par défaut : aujourd'hui (heure de Bruxelles).
     """
-    day = request.args.get("date", date.today().isoformat())
+    bounds = requested_day_bounds()
+    if bounds is None:
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+    start, end = bounds
 
     with get_conn() as conn:
         rows = conn.execute("""
@@ -67,18 +108,23 @@ def api_daily():
                 c.cnt_time,
                 c.hour_cnt,
                 c.day_cnt,
-                c.year_cnt
+                c.year_cnt,
+                (
+                    SELECT MAX(c3.hour_cnt) FROM counts c3
+                    WHERE c3.device_id = d.device_id
+                      AND c3.collected_at >= :start AND c3.collected_at < :end
+                ) AS peak_hour_cnt
             FROM devices d
             JOIN counts c ON c.device_id = d.device_id
             WHERE c.id = (
                 SELECT id FROM counts c2
                 WHERE c2.device_id = d.device_id
-                  AND substr(c2.collected_at, 1, 10) = ?
+                  AND c2.collected_at >= :start AND c2.collected_at < :end
                 ORDER BY c2.collected_at DESC
                 LIMIT 1
             )
             ORDER BY c.day_cnt DESC
-        """, (day,)).fetchall()
+        """, {"start": start, "end": end}).fetchall()
 
     result = [dict(r) for r in rows]
     return jsonify(result)
@@ -88,13 +134,17 @@ def api_daily():
 def api_history():
     """
     Retourne l'historique horaire des passages d'un compteur donné (?device_id=...)
-    pour une date donnée (?date=YYYY-MM-DD).
+    pour une date donnée (?date=YYYY-MM-DD, heure de Bruxelles).
     """
     device_id = request.args.get("device_id")
-    day = request.args.get("date", date.today().isoformat())
 
     if not device_id:
         return jsonify({"error": "device_id is required"}), 400
+
+    bounds = requested_day_bounds()
+    if bounds is None:
+        return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+    start, end = bounds
 
     with get_conn() as conn:
         rows = conn.execute("""
@@ -106,9 +156,9 @@ def api_history():
                 year_cnt
             FROM counts
             WHERE device_id = ?
-              AND substr(collected_at, 1, 10) = ?
+              AND collected_at >= ? AND collected_at < ?
             ORDER BY collected_at ASC
-        """, (device_id, day)).fetchall()
+        """, (device_id, start, end)).fetchall()
 
     result = [dict(r) for r in rows]
     return jsonify(result)
@@ -122,6 +172,7 @@ def api_refresh():
     try:
         import collector
         with get_conn() as conn:
+            collector.init_db(conn)
             inserted = collector.get_bike_data(conn)
         return jsonify({"status": "success", "inserted": inserted})
     except Exception as e:
@@ -906,7 +957,10 @@ function renderAll(data) {
 
   // Display time of last collection (convert UTC to Brussels local time)
   if (data && data.length > 0) {
-    const latestCollected = data[0].collected_at;
+    // data est trié par day_cnt : on cherche le relevé le plus récent (format
+    // "YYYY-MM-DD HH:MM:SS", donc comparable comme chaîne)
+    const latestCollected = data.reduce(
+      (max, d) => (d.collected_at && d.collected_at > max ? d.collected_at : max), '');
     if (latestCollected) {
       const utcDate = new Date(latestCollected.replace(' ', 'T') + 'Z');
       
@@ -964,7 +1018,7 @@ function renderAll(data) {
 
 function calculateStats(data) {
   const total = data.reduce((sum, item) => sum + (item.day_cnt || 0), 0);
-  const peak = Math.max(0, ...data.map(item => item.hour_cnt || 0));
+  const peak = Math.max(0, ...data.map(item => item.peak_hour_cnt || 0));
   
   let busiest = null;
   if (data.length > 0) {
@@ -1228,6 +1282,11 @@ async function loadData(day) {
   }
 }
 
+// Date du jour à Bruxelles au format YYYY-MM-DD (la locale sv-SE produit ce format)
+function todayBrussels() {
+  return new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Brussels' });
+}
+
 async function initDatePicker() {
   const picker = document.getElementById('datePicker');
   try {
@@ -1238,10 +1297,10 @@ async function initDatePicker() {
       picker.min   = dates[dates.length - 1];
       picker.max   = dates[0];
     } else {
-      picker.value = new Date().toISOString().slice(0, 10);
+      picker.value = todayBrussels();
     }
   } catch {
-    picker.value = new Date().toISOString().slice(0, 10);
+    picker.value = todayBrussels();
   }
   
   picker.addEventListener('change', () => loadData(picker.value));

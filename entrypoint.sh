@@ -13,8 +13,9 @@ echo "=== Collecte initiale ==="
 $PYTHON /app/collector.py
 
 echo "=== Configuration du cron (toutes les 30 min) ==="
-# Écriture du job cron — toutes les 30 minutes
-echo "*/30 * * * * $PYTHON /app/collector.py >> /var/log/collector.log 2>&1" \
+# Écriture du job cron — toutes les 30 minutes. cron n'hérite pas de
+# l'environnement du container : DB_PATH est donc injecté dans la ligne.
+echo "*/30 * * * * DB_PATH=${DB_PATH:-/data/velo.db} $PYTHON /app/collector.py >> /var/log/collector.log 2>&1" \
     | crontab -
 
 # Démarrage du démon cron en arrière-plan
